@@ -1,0 +1,63 @@
+name: Build & publish image
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Override the FreeBSD 14 version (e.g. 14.5-p4); otherwise derived from the tag, falling back to VERSION'
+        required: false
+      publish:
+        description: 'If false, skip upload + CF purge (dry-run validation)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write   # cosign keyless via GitHub OIDC
+
+jobs:
+  resolve-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+      - id: v
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${{ inputs.version }}" ]]; then
+            v="${{ inputs.version }}"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            v="${GITHUB_REF#refs/tags/v}"
+          else
+            v=$(tr -d '[:space:]' < VERSION)
+          fi
+          if [[ ! "$v" =~ ^14\.[0-9]+(-p[0-9]+)?$ ]]; then
+            echo "::error::version '$v' is not a FreeBSD 14 release (e.g. 14.5 or 14.5-p4)"
+            exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+  # VERSION follows the newest 14.x release and its security patch level
+  # (build/detect-upstream.sh, watched daily): 14.5-p4. 14.5 is the last 14.x
+  # point release; the branch is supported until 2028-11-30.
+  build:
+    needs: resolve-version
+    name: FreeBSD 14
+    uses: open-img-cloud/.github/.github/workflows/build-freebsd-image.yml@main
+    with:
+      os_name: freebsd-14
+      version: ${{ needs.resolve-version.outputs.version }}
+      output_filename: 'freebsd-{version}-x86_64.qcow2'
+      build_script: build/build.sh
+      # Dedicated FreeBSD runner (runner group freebsd-builder, limited to the FreeBSD repos
+      # and to build-freebsd-image.yml@main). Release, signing and smoke stay on ubuntu-latest.
+      build_runner: '["self-hosted","freebsd","amd64"]'
+      runtime_smoke_login_user: freebsd
+      publish: ${{ inputs.publish == true || github.event_name == 'push' }}
+      sync_latest: true
+    secrets: inherit
